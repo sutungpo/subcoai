@@ -1,0 +1,13 @@
+transformers
+whisperx
+funasr==1.1.11 
+modelscope==1.10.0
+torch>=2
+torchaudio>=2
+faster-whisper==1.0.0
+transformers
+pandas
+setuptools>=65
+nltk
+nemo_toolkit[asr]==1.23.0
+huggingface-hub==0.23.2
