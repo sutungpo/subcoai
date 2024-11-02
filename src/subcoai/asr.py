@@ -11,7 +11,7 @@ import torchaudio
 from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
-from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
+from .audio import SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
 
@@ -247,12 +247,11 @@ class FasterK2Pipeline(FasterPipeline):
         return audio
 
     def _forward(self, model_inputs):
-        SAMPLERATE = 16000
         stream = self.model.create_stream()
         assert isinstance(model_inputs['inputs'], torch.Tensor)
         # k2speech model accept 1d tensor, not batch
         audio = model_inputs['inputs'].squeeze(0).numpy()
-        stream.accept_waveform(SAMPLERATE, audio)
+        stream.accept_waveform(SAMPLE_RATE, audio)
         self.model.decode_stream(stream)
         return {'text': stream.result.text}
 
@@ -305,7 +304,6 @@ class FasterNemoPipeline(FasterPipeline):
 
     def load_audio(self, audio_path):
         import torchaudio.transforms as T
-        SAMPLE_RATE = 16000
         waveform, sample_rate = torchaudio.load(audio_path)
         if waveform.size(0) > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
@@ -362,7 +360,7 @@ class FasterNemoPipeline(FasterPipeline):
                     "-to", f"{end_time:.2f}", "-ar", f"{self.sample_rate}", "-ac", "1", f"{out_audio}"
                 ]
                 subprocess.run(command, check=True)
-                
+
                 yield {'inputs': out_audio}
 
         vad_segments = self.vad_model({
@@ -399,6 +397,49 @@ class FasterNemoPipeline(FasterPipeline):
         return {"segments": segments, "language": self.preset_language}
 
 
+class FasterM4tPipeline(FasterPipeline):
+    """
+    Huggingface Pipeline wrapper for FasterWhisperModel.
+    """
+
+    # TODO:
+    # - add support for timestamp mode
+    # - add support for custom inference kwargs    
+    def __init__(self,
+                 model,
+                 vad,
+                 vad_params: dict,
+                 options: NamedTuple,
+                 tokenizer=None,
+                 device: Union[int, str, "torch.device"] = -1,
+                 framework="pt",
+                 language: Optional[str] = None,
+                 suppress_numerals: bool = False,
+                 **kwargs):
+        super().__init__(model, vad, vad_params, options, tokenizer, device,
+                         framework, language, suppress_numerals, **kwargs)
+        from transformers import AutoProcessor
+        self.processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
+
+    def preprocess(self, audio):
+        audio = self.processor(audios=audio['inputs'], src_lang="jpn",return_tensors="pt")
+        return {'inputs': audio}
+
+    def _forward(self, model_inputs):
+        tgt_lang = 'jpn'
+        output_tokens = self.model.generate(**model_inputs['inputs'], tgt_lang=tgt_lang, generate_speech=False)
+        translated_text_from_audio = self.processor.decode(output_tokens[0].tolist()[0], skip_special_tokens=True)
+        return {'text': translated_text_from_audio}
+
+    def postprocess(self, model_outputs):
+        return model_outputs
+
+    def load_audio(self, audio_path):
+        audio, orig_freq = torchaudio.load(audio_path)
+        audio = torchaudio.functional.resample(audio,
+                                               orig_freq=orig_freq,
+                                               new_freq=SAMPLE_RATE)
+        return audio
 
 def load_model(asr_arch,
                device,
@@ -439,7 +480,7 @@ def load_model(asr_arch,
             inst_cl = FasterFunPipeline
         case "k2asr":
             from reazonspeech.k2.asr import load_model
-            model = load_model()
+            model = load_model(device=device)
             inst_cl = FasterK2Pipeline
         case "nemoasr":
             import nemo.collections.asr as nemo_asr
@@ -447,6 +488,13 @@ def load_model(asr_arch,
                 model_name="nvidia/parakeet-tdt_ctc-0.6b-ja",
                 map_location=torch.device(device))
             inst_cl = FasterNemoPipeline
+        case "m4tasr":
+            from transformers import SeamlessM4Tv2Model
+
+            model = SeamlessM4Tv2Model.from_pretrained(
+                "facebook/seamless-m4t-v2-large")
+            model.to(device)
+            inst_cl = FasterM4tPipeline
         case _:
             raise ValueError(f"Unsupported ASR model: {asr_arch}")
 
