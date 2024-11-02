@@ -9,5 +9,6 @@ transformers
 pandas
 setuptools>=65
 nltk
+pysubs2
 nemo_toolkit[asr]==1.23.0
 huggingface-hub==0.23.2
