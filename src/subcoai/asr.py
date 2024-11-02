@@ -202,7 +202,7 @@ class FasterPipeline(Pipeline):
                 "end": round(vad_segments[idx]['end'], 3)
             })
 
-        return {"segments": segments, "language": self.preset_language}
+        return {"segments": segments, "language": "ja"}
 
     @abstractmethod
     def load_audio(self, audio_path):
