@@ -3,6 +3,10 @@ import warnings
 from abc import abstractmethod
 from typing import List, Union, Optional, NamedTuple
 
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+
 # import ctranslate2
 # import faster_whisper
 import numpy as np
@@ -14,6 +18,9 @@ from transformers.pipelines.pt_utils import PipelineIterator
 from .audio import SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
+
+import logging
+logger = logging.getLogger(__name__)    
 
 """ 
 class WhisperModel(faster_whisper.WhisperModel):
@@ -201,6 +208,8 @@ class FasterPipeline(Pipeline):
                 "start": round(vad_segments[idx]['start'], 3),
                 "end": round(vad_segments[idx]['end'], 3)
             })
+            
+        logger.info(segments)
 
         return {"segments": segments, "language": "ja"}
 
@@ -529,7 +538,6 @@ def subs(result: TranscriptionResult, print_text=True):
         event = SSAEvent(start=pysubs2.make_time(s=chunk['start']),
                          end=pysubs2.make_time(s=chunk['end']))
         event.plaintext = chunk['text']
-        print(event.plaintext)
         subs.append(event)
 
     return subs

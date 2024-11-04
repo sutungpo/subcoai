@@ -47,6 +47,10 @@ Thumbs.db
 *.h5
 *.tflite
 
+# log files
+*.log
+logs/*
+
 # Venv
 sub/*
 __pycache__

@@ -287,7 +287,9 @@ def merge_chunks(
         return []
     # assert segments_list, "segments_list is empty."
     # Make sur the starting point is the start of the segment.
-    curr_start = segments_list[0].start
+    # curr_start = segments_list[0].start
+    # modify to start from 0 as vad maybe inaccurate at the beginning
+    curr_start = 0
 
     for seg in segments_list:
         if seg.end - curr_start > chunk_size and curr_end-curr_start > 0:
