@@ -293,12 +293,19 @@ def merge_chunks(
 
     for seg in segments_list:
         if seg.end - curr_start > chunk_size and curr_end-curr_start > 0:
+            # merged_segments.append({
+            #     "start": curr_start,
+            #     "end": curr_end,
+            #     "segments": seg_idxs,
+            # })
+            #curr_start = seg.start
+            curr_end = seg.end
             merged_segments.append({
                 "start": curr_start,
                 "end": curr_end,
                 "segments": seg_idxs,
             })
-            curr_start = seg.start
+            curr_start = seg.end
             seg_idxs = []
             speaker_idxs = []
         curr_end = seg.end
