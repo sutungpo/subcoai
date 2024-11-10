@@ -3,10 +3,6 @@ import warnings
 from abc import abstractmethod
 from typing import List, Union, Optional, NamedTuple
 
-import logging
-import sys
-from logging.handlers import RotatingFileHandler
-
 # import ctranslate2
 # import faster_whisper
 import numpy as np
@@ -20,7 +16,7 @@ from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
 
 import logging
-logger = logging.getLogger(__name__)    
+logger = logging.getLogger(__name__)
 
 """ 
 class WhisperModel(faster_whisper.WhisperModel):
@@ -166,6 +162,7 @@ class FasterPipeline(Pipeline):
                    language=None,
                    task=None,
                    chunk_size=30,
+                   skip_silence=True,
                    print_progress=False,
                    combined_progress=False) -> TranscriptionResult:
         audio = self.load_audio(audio)
@@ -185,6 +182,7 @@ class FasterPipeline(Pipeline):
         vad_segments = merge_chunks(
             vad_segments,
             chunk_size,
+            skip_silence=skip_silence,
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
@@ -208,7 +206,7 @@ class FasterPipeline(Pipeline):
                 "start": round(vad_segments[idx]['start'], 3),
                 "end": round(vad_segments[idx]['end'], 3)
             })
-            
+
         logger.info(segments)
 
         return {"segments": segments, "language": "ja"}
@@ -413,7 +411,7 @@ class FasterM4tPipeline(FasterPipeline):
 
     # TODO:
     # - add support for timestamp mode
-    # - add support for custom inference kwargs    
+    # - add support for custom inference kwargs
     def __init__(self,
                  model,
                  vad,

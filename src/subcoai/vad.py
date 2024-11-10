@@ -15,6 +15,9 @@ from tqdm import tqdm
 
 from .diarize import Segment as SegmentX
 
+from logging import getLogger
+logger = getLogger(__name__)
+
 VAD_SEGMENTATION_URL = "https://whisperx.s3.eu-west-2.amazonaws.com/model_weights/segmentation/0b5b3216d60a2d32fc086b47ea8c67589aaeb26b7e07fcbe620d6d0b83e209ea/pytorch_model.bin"
 
 def load_vad_model(device, vad_onset=0.500, vad_offset=0.363, use_auth_token=None, model_fp=None):
@@ -49,7 +52,7 @@ def load_vad_model(device, vad_onset=0.500, vad_offset=0.363, use_auth_token=Non
         )
 
     vad_model = Model.from_pretrained(model_fp, use_auth_token=use_auth_token)
-    hyperparameters = {"onset": vad_onset, 
+    hyperparameters = {"onset": vad_onset,
                     "offset": vad_offset,
                     "min_duration_on": 0.1,
                     "min_duration_off": 0.1}
@@ -145,7 +148,7 @@ class Binarize:
             t = start
             for t, y in zip(timestamps[1:], k_scores[1:]):
                 # currently active
-                if is_active: 
+                if is_active:
                     curr_duration = t - start
                     if curr_duration > self.max_duration:
                         search_after = len(curr_scores) // 2
@@ -250,20 +253,22 @@ def merge_vad(vad_arr, pad_onset=0.0, pad_offset=0.0, min_duration_off=0.0, min_
 
     if pad_offset > 0.0 or pad_onset > 0.0 or min_duration_off > 0.0:
         active = active.support(collar=min_duration_off)
-    
+
     # remove tracks shorter than min_duration_on
     if min_duration_on > 0:
         for segment, track in list(active.itertracks()):
             if segment.duration < min_duration_on:
-                    del active[segment, track]
-    
+                del active[segment, track]
+
     active = active.for_json()
     active_segs = pd.DataFrame([x['segment'] for x in active['content']])
     return active_segs
 
+
 def merge_chunks(
     segments,
     chunk_size,
+    skip_silence=True,
     onset: float = 0.5,
     offset: Optional[float] = None,
 ):
@@ -280,7 +285,8 @@ def merge_chunks(
     segments = binarize(segments)
     segments_list = []
     for speech_turn in segments.get_timeline():
-        segments_list.append(SegmentX(speech_turn.start, speech_turn.end, "UNKNOWN"))
+        segments_list.append(
+            SegmentX(speech_turn.start, speech_turn.end, "UNKNOWN"))
 
     if len(segments_list) == 0:
         print("No active speech found in audio")
@@ -289,23 +295,37 @@ def merge_chunks(
     # Make sur the starting point is the start of the segment.
     # curr_start = segments_list[0].start
     # modify to start from 0 as vad maybe inaccurate at the beginning
-    curr_start = 0
+    MAX_LENGTH = 30
+    if not skip_silence:
+        curr_start = 0
+        for seg in segments_list:
+            seg_idxs.append((seg.start, seg.end))
+            speaker_idxs.append(seg.speaker)
+            if seg.end - curr_start > chunk_size or seg == segments_list[-1]:
+                curr_end = seg.end
+                if curr_end - curr_start > MAX_LENGTH:
+                    logger.warning(f"Segment length from {curr_start} to {curr_end} is longer than {MAX_LENGTH} seconds.")
+                merged_segments.append({
+                    "start": curr_start,
+                    "end": curr_end,
+                    "segments": seg_idxs,
+                })
+                curr_start = seg.end
+                seg_idxs = []
+                speaker_idxs = []
+        return merged_segments
 
+    curr_start = segments_list[0].start
     for seg in segments_list:
         if seg.end - curr_start > chunk_size and curr_end-curr_start > 0:
-            # merged_segments.append({
-            #     "start": curr_start,
-            #     "end": curr_end,
-            #     "segments": seg_idxs,
-            # })
-            #curr_start = seg.start
-            curr_end = seg.end
+            if curr_end - curr_start > MAX_LENGTH:
+                logger.warning(f"Segment length from {curr_start} to {curr_end} is longer than {MAX_LENGTH} seconds.")
             merged_segments.append({
                 "start": curr_start,
                 "end": curr_end,
                 "segments": seg_idxs,
             })
-            curr_start = seg.end
+            curr_start = seg.start
             seg_idxs = []
             speaker_idxs = []
         curr_end = seg.end
@@ -316,5 +336,5 @@ def merge_chunks(
                 "start": curr_start,
                 "end": curr_end,
                 "segments": seg_idxs,
-            })    
-    return merged_segments
+            })
+    return merged_segments    
