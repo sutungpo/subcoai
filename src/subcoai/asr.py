@@ -11,7 +11,7 @@ import torchaudio
 from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
-from .audio import SAMPLE_RATE, load_audio, log_mel_spectrogram
+from .audio import SAMPLE_RATE, load_audio
 from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
 
@@ -165,7 +165,7 @@ class FasterPipeline(Pipeline):
                    skip_silence=True,
                    print_progress=False,
                    combined_progress=False) -> TranscriptionResult:
-        audio = self.load_audio(audio)
+        loaded_audio = self.load_audio(audio)
 
         # audio is a pytoch tensor format
         def data(audio, segments):
@@ -175,10 +175,13 @@ class FasterPipeline(Pipeline):
                 # print(f2-f1)
                 yield {'inputs': audio[f1:f2]}
 
+        # to align with whisperx timestamp line, using whisperx's load_audio function
+        vad_audio = load_audio(audio)    
         vad_segments = self.vad_model({
-            "waveform": audio.unsqueeze(0),
+            "waveform": torch.from_numpy(vad_audio).unsqueeze(0),
             "sample_rate": SAMPLE_RATE
         })
+        del vad_audio
         vad_segments = merge_chunks(
             vad_segments,
             chunk_size,
@@ -191,7 +194,7 @@ class FasterPipeline(Pipeline):
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
         for idx, out in enumerate(
-                self.__call__(data(audio, vad_segments),
+                self.__call__(data(loaded_audio, vad_segments),
                               batch_size=batch_size,
                               num_workers=num_workers)):
             if print_progress:
@@ -532,10 +535,14 @@ def subs(result: TranscriptionResult, print_text=True):
     import pysubs2
     from pysubs2 import SSAFile, SSAEvent
     subs = SSAFile()
+    print_lines = []
     for chunk in result['segments']:
         event = SSAEvent(start=pysubs2.make_time(s=chunk['start']),
                          end=pysubs2.make_time(s=chunk['end']))
         event.plaintext = chunk['text']
         subs.append(event)
-
+        if print_text:
+            print_lines.append(f"[{chunk['start']:.2f}-{chunk['end']:.2f}] {chunk['text']}")
+    if print_text:
+        logger.info("\n".join(print_lines))
     return subs
