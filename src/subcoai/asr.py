@@ -162,6 +162,7 @@ class FasterPipeline(Pipeline):
                    language=None,
                    task=None,
                    chunk_size=30,
+                   chunks_ref=None,
                    skip_silence=True,
                    print_progress=False,
                    combined_progress=False) -> TranscriptionResult:
@@ -175,20 +176,32 @@ class FasterPipeline(Pipeline):
                 # print(f2-f1)
                 yield {'inputs': audio[f1:f2]}
 
+        if chunks_ref is None:
         # to align with whisperx timestamp line, using whisperx's load_audio function
-        vad_audio = load_audio(audio)    
-        vad_segments = self.vad_model({
-            "waveform": torch.from_numpy(vad_audio).unsqueeze(0),
-            "sample_rate": SAMPLE_RATE
-        })
-        del vad_audio
-        vad_segments = merge_chunks(
-            vad_segments,
-            chunk_size,
-            skip_silence=skip_silence,
-            onset=self._vad_params["vad_onset"],
-            offset=self._vad_params["vad_offset"],
-        )
+            vad_audio = load_audio(audio)
+            vad_segments = self.vad_model({
+                "waveform":
+                torch.from_numpy(vad_audio).unsqueeze(0),
+                "sample_rate":
+                SAMPLE_RATE
+            })
+            del vad_audio
+            # skip_silence means time chunks are not adjacant to each other
+            vad_segments = merge_chunks(
+                vad_segments,
+                chunk_size,
+                skip_silence=skip_silence,
+                onset=self._vad_params["vad_onset"],
+                offset=self._vad_params["vad_offset"],
+            )
+        else:
+            import pysubs2
+            subs = pysubs2.load(chunks_ref)
+            vad_segments = []
+            for sub in subs:
+                start = int(sub.start) / 1000
+                end = int(sub.end) / 1000
+                vad_segments.append({"start": start, "end": end,"segments":[]})
 
         segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
@@ -342,7 +355,8 @@ class FasterNemoPipeline(FasterPipeline):
         final_iterator = PipelineIterator(model_iterator, self.postprocess,
                                           postprocess_params)
         return final_iterator
-
+    
+    # attention, base Pipeline may has different implementation
     def transcribe(self,
                    audio: str,
                    batch_size=None,
@@ -530,19 +544,21 @@ def load_model(asr_arch,
                    vad_params=default_vad_options,
                    **kwargs)
 
-
-def subs(result: TranscriptionResult, print_text=True):
-    import pysubs2
-    from pysubs2 import SSAFile, SSAEvent
+def subs(result: TranscriptionResult,out_file=None,print_text=True):
+    from pysubs2 import SSAFile, SSAEvent, make_time
+    from pysubs2.time import ms_to_str
     subs = SSAFile()
     print_lines = []
     for chunk in result['segments']:
-        event = SSAEvent(start=pysubs2.make_time(s=chunk['start']),
-                         end=pysubs2.make_time(s=chunk['end']))
+        event = SSAEvent(start=make_time(s=chunk['start']),
+                         end=make_time(s=chunk['end']))
         event.plaintext = chunk['text']
         subs.append(event)
         if print_text:
-            print_lines.append(f"[{chunk['start']:.2f}-{chunk['end']:.2f}] {chunk['text']}")
+            start = ms_to_str(event.start, fractions=True)
+            end = ms_to_str(event.end, fractions=True)
+            print_lines.append(f"[{start}-{end}] {event.plaintext}")
+    if out_file is not None:
+        subs.save(out_file)
     if print_text:
         logger.info("\n".join(print_lines))
-    return subs
