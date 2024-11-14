@@ -728,7 +728,6 @@ def load_model(asr_arch,
             model = WhisperModel(model_size,device=device,compute_type=compute_type)
             inst_cl = FasterWhisperxPipeline
         case "whisper":
-            import torch
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             model_id = "openai/whisper-large-v3"
@@ -761,9 +760,7 @@ def load_model(asr_arch,
     if vad_model is not None:
         vad_model = vad_model
     else:
-        vad_model = load_vad_model(torch.device(device),
-                                   use_auth_token=None,
-                                   **default_vad_options)
+        vad_model = load_vad_model(torch.device(device), use_auth_token=None, **default_vad_options)
 
     return inst_cl(model=model,
                    vad=vad_model,
