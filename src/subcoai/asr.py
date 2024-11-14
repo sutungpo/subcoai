@@ -465,10 +465,212 @@ class FasterM4tPipeline(FasterPipeline):
                                                new_freq=SAMPLE_RATE)
         return audio
 
+class FasterWhisperxPipeline(FasterPipeline):
+    """
+    abstract Pipeline wrapper for FasterAsrModel.
+    """
+
+    def __init__(self,
+                 model,
+                 vad,
+                 vad_params: dict,
+                 options: NamedTuple,
+                 tokenizer=None,
+                 device: Union[int, str, "torch.device"] = -1,
+                 framework="pt",
+                 language: Optional[str] = None,
+                 suppress_numerals: bool = False,
+                 **kwargs):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.options = options
+        self.preset_language = language
+        self.suppress_numerals = suppress_numerals
+        self._batch_size = kwargs.pop("batch_size", None)
+        self._num_workers = 1
+        self._preprocess_params, self._forward_params, self._postprocess_params = self._sanitize_parameters(
+            **kwargs)
+        self.call_count = 0
+        self.framework = framework
+        if self.framework == "pt":
+            if isinstance(device, torch.device):
+                self.device = device
+            elif isinstance(device, str):
+                self.device = torch.device(device)
+            elif device < 0:
+                self.device = torch.device("cpu")
+            else:
+                self.device = torch.device(f"cuda:{device}")
+        else:
+            self.device = device
+
+        super(Pipeline, self).__init__()
+        self.vad_model = vad
+        self._vad_params = vad_params
+
+    def preprocess(self, audio):
+        pass
+
+    def _forward(self, model_inputs):
+        pass
+
+    def postprocess(self, model_outputs):
+        pass
+
+    def load_audio(self, audio_path):
+        from whisperx import load_audio
+        return load_audio(audio_path)
+    
+    def transcribe(self,
+                   audio: Union[str, np.ndarray],
+                   batch_size=None,
+                   num_workers=0,
+                   language=None,
+                   task="transcribe",
+                   chunk_size=30,
+                   chunks_ref=None,
+                   skip_silence=True,
+                   print_progress=False,
+                   combined_progress=False) -> TranscriptionResult:
+        loaded_audio = self.load_audio(audio)
+
+        def data(audio, segments):
+            for seg in segments:
+                f1 = int(seg['start'] * SAMPLE_RATE)
+                f2 = int(seg['end'] * SAMPLE_RATE)
+                # print(f2-f1)
+                yield {'inputs': audio[f1:f2],"start":seg['start'],"end":seg['end']}
+
+        def get_segment(segments):
+            seg_texts = []
+            start_time = None
+            end_time = None
+            for seg in segments:
+                if start_time is None:
+                    start_time = seg.start
+                end_time = seg.end
+                seg_texts.append(seg.text)
+            segment = {"start": round(start_time, 3) if start_time is not None else 0.0, "end": round(end_time, 3) if end_time is not None else 0.0, "text": "".join(seg_texts)}
+            return segment
+
+        segments: List[SingleSegment] = []
+        batch_size = batch_size or self._batch_size
+        if chunks_ref is not None:
+            import pysubs2
+            subs = pysubs2.load(chunks_ref)
+            vad_segments = []
+            for sub in subs:
+                start = int(sub.start) / 1000
+                end = int(sub.end) / 1000
+                vad_segments.append({"start": start, "end": end,"segments":[]})
+
+            for idex, seg in enumerate(data(loaded_audio, vad_segments)):
+                audio = seg['inputs']
+                segs, _ = self.model.transcribe(audio,language=language, task=task)
+                segment = {"start": seg['start'],"end":seg['end'],"text":get_segment(segs)['text']}
+                segments.append(segment)
+        else:
+            segs, _ = self.model.transcribe(audio,language=language, task=task)
+            segments.append(get_segment(segs))
+
+        logger.info(segments)
+
+        return {"segments": segments, "language": "ja"}
+    
+class FasterWhisperPipeline(FasterPipeline):
+    """
+    abstract Pipeline wrapper for FasterAsrModel.
+    """
+
+    def __init__(self,
+                 model,
+                 device: Union[int, str, "torch.device"] = -1,
+                 framework="pt",
+                 language: Optional[str] = None,
+                 **kwargs):
+        self.model = model
+        self.preset_language = language
+        self._batch_size = kwargs.pop("batch_size", None)
+        self._num_workers = 1
+        self.framework = framework
+        if self.framework == "pt":
+            if isinstance(device, torch.device):
+                self.device = device
+            elif isinstance(device, str):
+                self.device = torch.device(device)
+            elif device < 0:
+                self.device = torch.device("cpu")
+            else:
+                self.device = torch.device(f"cuda:{device}")
+        else:
+            self.device = device
+        super(Pipeline, self).__init__()
+
+    def preprocess(self, audio):
+        pass
+
+    def _forward(self, model_inputs):
+        pass
+
+    def postprocess(self, model_outputs):
+        pass
+
+    def load_audio(self, audio_path):
+        from librosa import load
+        audio, _ = load(audio_path, sr=SAMPLE_RATE, mono=True)
+        return audio
+    
+    def transcribe(self,
+                   audio: Union[str, np.ndarray],
+                   batch_size=None,
+                   num_workers=0,
+                   language=None,
+                   task="transcribe",
+                   chunk_size=30,
+                   chunks_ref=None,
+                   skip_silence=True,
+                   print_progress=False,
+                   combined_progress=False) -> TranscriptionResult:
+
+        def data(audio, segments):
+            for seg in segments:
+                f1 = int(seg['start'] * SAMPLE_RATE)
+                f2 = int(seg['end'] * SAMPLE_RATE)
+                # print(f2-f1)
+                yield {'inputs': audio[f1:f2],"start":seg['start'],"end":seg['end']}
+
+        segments: List[SingleSegment] = []
+        batch_size = batch_size or self._batch_size
+        if chunks_ref is not None:
+            import pysubs2
+            subs = pysubs2.load(chunks_ref)
+            vad_segments = []
+            for sub in subs:
+                start = int(sub.start) / 1000
+                end = int(sub.end) / 1000
+                vad_segments.append({"start": start, "end": end,"segments":[]})
+
+            loaded_audio = self.load_audio(audio)
+            for seg in data(loaded_audio, vad_segments):
+                audio = seg['inputs']
+                generate_kwargs={"language": "japanese"}
+                result = self.model(audio, generate_kwargs=generate_kwargs)
+                segment = {"start": seg['start'],"end":seg['end'],"text":result['text']}
+                segments.append(segment)
+        else:
+            generate_kwargs={"language": "japanese", "task": "transcribe"}
+            result = self.model(audio,generate_kwargs=generate_kwargs, return_timestamps=True)
+            segment = {"start": 0,"end":0,"text":result['text']}
+            segments.append(segment)
+
+        logger.info(segments)
+
+        return {"segments": segments, "language": "ja"}
+
 def load_model(asr_arch,
                device,
                asr_options=None,
-               language: Optional[str] = "auto",
+               language: Optional[str] = None,
                vad_model=None,
                vad_options=None,
                **kwargs):
@@ -519,6 +721,32 @@ def load_model(asr_arch,
                 "facebook/seamless-m4t-v2-large")
             model.to(device)
             inst_cl = FasterM4tPipeline
+        case "whisperx":
+            from faster_whisper import WhisperModel
+            model_size = "base"
+            compute_type = "int8"
+            model = WhisperModel(model_size,device=device,compute_type=compute_type)
+            inst_cl = FasterWhisperxPipeline
+        case "whisper":
+            import torch
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+            torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            model_id = "openai/whisper-large-v3"
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_id, torch_dtype=torch_dtype)
+            model.to(device)
+
+            processor = AutoProcessor.from_pretrained(model_id)
+
+            model = pipeline(
+                "automatic-speech-recognition",
+                model=model,
+                tokenizer=processor.tokenizer,
+                feature_extractor=processor.feature_extractor,
+                torch_dtype=torch_dtype,
+                device=device,
+            )
+            inst_cl = FasterWhisperPipeline
         case _:
             raise ValueError(f"Unsupported ASR model: {asr_arch}")
 
