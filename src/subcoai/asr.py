@@ -2,6 +2,7 @@ import os
 import warnings
 from abc import abstractmethod
 from typing import List, Union, Optional, NamedTuple
+from types import SimpleNamespace
 
 # import ctranslate2
 # import faster_whisper
@@ -177,7 +178,7 @@ class FasterPipeline(Pipeline):
                 yield {'inputs': audio[f1:f2]}
 
         if chunks_ref is None:
-        # to align with whisperx timestamp line, using whisperx's load_audio function
+            # to align with whisperx timestamp line, using whisperx's load_audio function
             vad_audio = load_audio(audio)
             vad_segments = self.vad_model({
                 "waveform":
@@ -231,6 +232,7 @@ class FasterPipeline(Pipeline):
     def load_audio(self, audio_path):
         raise NotImplementedError("load_audio not implemented")
 
+'''
 class FasterFunPipeline(FasterPipeline):
     """
     Huggingface Pipeline wrapper for FasterWhisperModel.
@@ -255,7 +257,114 @@ class FasterFunPipeline(FasterPipeline):
         from funasr.utils.load_utils import load_audio_text_image_video
         audio = load_audio_text_image_video(audio_path)
         return audio
+'''   
+ 
+class FasterFunPipeline(FasterPipeline):
+    """
+    Huggingface Pipeline wrapper for FasterWhisperModel.
+    """
+    # TODO:
+    # - add support for timestamp mode
+    # - add support for custom inference kwargs
 
+    def _sanitize_parameters(self, **kwargs):
+        preprocess_kwargs = {}
+        if "tokenizer" in kwargs:
+            preprocess_kwargs["maybe_arg"] = kwargs["maybe_arg"]
+        forward_kwargs = {}
+        if "language" in kwargs:
+            forward_kwargs["language"] = kwargs["language"]
+        return preprocess_kwargs, forward_kwargs, {}
+
+    def preprocess(self, audio):
+        return audio
+
+    def _forward(self, model_inputs, language="ja"):
+        outputs = self.model.inference(model_inputs['inputs'], language=language,**self.options)
+        return {'text': outputs[0][0]['text']}
+
+    def postprocess(self, model_outputs):
+        from funasr.utils.postprocess_utils import rich_transcription_postprocess
+        post_text = rich_transcription_postprocess(model_outputs["text"])
+        return {'text': post_text}
+
+    def load_audio(self, audio_path):
+        from funasr.utils.load_utils import load_audio_text_image_video
+        audio = load_audio_text_image_video(audio_path)
+        return audio
+
+    def transcribe(self,
+                   audio: Union[str, np.ndarray],
+                   batch_size=None,
+                   num_workers=0,
+                   language=None,
+                   task=None,
+                   chunk_size=30,
+                   chunks_ref=None,
+                   skip_silence=True,
+                   print_progress=False,
+                   combined_progress=False) -> TranscriptionResult:
+        if isinstance(audio, str):
+            audio = self.load_audio(audio)
+
+        # audio is a pytoch tensor format
+        def data(audio, segments):
+            for seg in segments:
+                f1 = int(seg['start'] * SAMPLE_RATE)
+                f2 = int(seg['end'] * SAMPLE_RATE)
+                # print(f2-f1)
+                yield {'inputs': audio[f1:f2]}
+
+        if chunks_ref is None:
+            # to align with whisperx timestamp line, using whisperx's load_audio function
+            vad_audio = load_audio(audio)
+            vad_segments = self.vad_model({
+                "waveform":
+                torch.from_numpy(vad_audio).unsqueeze(0),
+                "sample_rate":
+                SAMPLE_RATE
+            })
+            del vad_audio
+            # skip_silence means time chunks are not adjacant to each other
+            vad_segments = merge_chunks(
+                vad_segments,
+                chunk_size,
+                skip_silence=skip_silence,
+                onset=self._vad_params["vad_onset"],
+                offset=self._vad_params["vad_offset"],
+            )
+        else:
+            import pysubs2
+            subs = pysubs2.load(chunks_ref)
+            vad_segments = []
+            for sub in subs:
+                start = int(sub.start) / 1000
+                end = int(sub.end) / 1000
+                vad_segments.append({"start": start, "end": end,"segments":[]})
+
+        segments: List[SingleSegment] = []
+        batch_size = batch_size or self._batch_size
+        total_segments = len(vad_segments)
+        for idx, out in enumerate(
+                self.__call__(data(audio, vad_segments),
+                              batch_size=batch_size,
+                              num_workers=num_workers, language=language)):
+            if print_progress:
+                base_progress = ((idx + 1) / total_segments) * 100
+                percent_complete = base_progress / 2 if combined_progress else base_progress
+                print(f"Progress: {percent_complete:.2f}%...")
+            text = out['text']
+            # if batch_size in [0, 1, None]:
+            #     text = text[0]
+            segments.append({
+                "text": text,
+                "start": round(vad_segments[idx]['start'], 3),
+                "end": round(vad_segments[idx]['end'], 3)
+            })
+
+        logger.info(segments)
+
+        return {"segments": segments, "language": "ja"}
 
 class FasterK2Pipeline(FasterPipeline):
     """
@@ -267,28 +376,70 @@ class FasterK2Pipeline(FasterPipeline):
     # - add support for custom inference kwargs
 
     def preprocess(self, audio):
-        return audio
+        pass
 
     def _forward(self, model_inputs):
-        stream = self.model.create_stream()
-        assert isinstance(model_inputs['inputs'], torch.Tensor)
-        # k2speech model accept 1d tensor, not batch
-        audio = model_inputs['inputs'].squeeze(0).numpy()
-        stream.accept_waveform(SAMPLE_RATE, audio)
-        self.model.decode_stream(stream)
-        return {'text': stream.result.text}
+        pass
 
     def postprocess(self, model_outputs):
-        return model_outputs
+        pass
 
     def load_audio(self, audio_path):
         from reazonspeech.k2.asr import audio_from_path
-        from reazonspeech.k2.asr.audio import audio_to_file, pad_audio, norm_audio
         audio = audio_from_path(audio_path)
-        PAD_SECONDS = 0.9
-        audio = pad_audio(norm_audio(audio), PAD_SECONDS)
-        return torch.from_numpy(audio.waveform)
+        return audio
 
+    def transcribe(self,
+                   audio: Union[str, np.ndarray],
+                   batch_size=None,
+                   num_workers=0,
+                   language=None,
+                   task=None,
+                   chunk_size=30,
+                   chunks_ref=None,
+                   skip_silence=True,
+                   print_progress=False,
+                   combined_progress=False) -> TranscriptionResult:
+        if isinstance(audio, str):
+            audio = self.load_audio(audio)
+
+        # audio is a pytoch tensor format
+        def data(audio, segments):
+            for seg in segments:
+                f1 = int(seg['start'] * SAMPLE_RATE)
+                f2 = int(seg['end'] * SAMPLE_RATE)
+                # print(f2-f1)
+                audio_seg = SimpleNamespace(waveform=audio.waveform[f1:f2], samplerate=audio.samplerate)
+                yield {'inputs': audio_seg,"start":seg['start'],"end":seg['end']}
+
+        from reazonspeech.k2.asr import transcribe
+        segments: List[SingleSegment] = []
+        if chunks_ref is None:
+            # to align with whisperx timestamp line, using whisperx's load_audio function
+            ret = transcribe(self.model, audio)
+            segment = {"start": 0,"end":0,"text":result.text}
+            segments.append(segment)
+        else:
+            import pysubs2
+            subs = pysubs2.load(chunks_ref)
+            vad_segments = []
+            for sub in subs:
+                start = int(sub.start) / 1000
+                end = int(sub.end) / 1000
+                vad_segments.append({
+                    "start": start,
+                    "end": end,
+                    "segments": []
+                })
+            for seg in data(audio, vad_segments):
+                audio = seg['inputs']
+                result = transcribe(self.model, audio)
+                segment = {"start": seg['start'],"end":seg['end'],"text":result.text}
+                segments.append(segment)
+
+        logger.info(segments)
+
+        return {"segments": segments, "language": "ja"}
 
 class FasterNemoPipeline(FasterPipeline):
     """
@@ -355,7 +506,7 @@ class FasterNemoPipeline(FasterPipeline):
         final_iterator = PipelineIterator(model_iterator, self.postprocess,
                                           postprocess_params)
         return final_iterator
-    
+
     # attention, base Pipeline may has different implementation
     def transcribe(self,
                    audio: str,
@@ -520,7 +671,7 @@ class FasterWhisperxPipeline(FasterPipeline):
     def load_audio(self, audio_path):
         from whisperx import load_audio
         return load_audio(audio_path)
-    
+
     def transcribe(self,
                    audio: Union[str, np.ndarray],
                    batch_size=None,
@@ -576,7 +727,7 @@ class FasterWhisperxPipeline(FasterPipeline):
         logger.info(segments)
 
         return {"segments": segments, "language": "ja"}
-    
+
 class FasterWhisperPipeline(FasterPipeline):
     """
     abstract Pipeline wrapper for FasterAsrModel.
@@ -619,7 +770,7 @@ class FasterWhisperPipeline(FasterPipeline):
         from librosa import load
         audio, _ = load(audio_path, sr=SAMPLE_RATE, mono=True)
         return audio
-    
+
     def transcribe(self,
                    audio: Union[str, np.ndarray],
                    batch_size=None,
@@ -653,12 +804,12 @@ class FasterWhisperPipeline(FasterPipeline):
             loaded_audio = self.load_audio(audio)
             for seg in data(loaded_audio, vad_segments):
                 audio = seg['inputs']
-                generate_kwargs={"language": "japanese"}
+                generate_kwargs={"language": "japanese", "no_repeat_ngram_size": 0, "repetition_penalty": 1.0}
                 result = self.model(audio, generate_kwargs=generate_kwargs)
                 segment = {"start": seg['start'],"end":seg['end'],"text":result['text']}
                 segments.append(segment)
         else:
-            generate_kwargs={"language": "japanese", "task": "transcribe"}
+            generate_kwargs={"language": "japanese", "no_repeat_ngram_size": 0, "repetition_penalty": 1.0}
             result = self.model(audio,generate_kwargs=generate_kwargs, return_timestamps=True)
             segment = {"start": 0,"end":0,"text":result['text']}
             segments.append(segment)
@@ -698,7 +849,6 @@ def load_model(asr_arch,
                 device=device)
             model.eval()
             default_asr_options = {
-                "language": language,
                 "use_itn": False,
                 "ban_emo_unk": False
             }
@@ -730,7 +880,8 @@ def load_model(asr_arch,
         case "whisper":
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            model_id = "openai/whisper-large-v3"
+            # model_id = "openai/whisper-large-v3"
+            model_id = "litagin/anime-whisper"
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 model_id, torch_dtype=torch_dtype)
             model.to(device)
