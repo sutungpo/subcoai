@@ -267,26 +267,14 @@ class FasterFunPipeline(FasterPipeline):
     # - add support for timestamp mode
     # - add support for custom inference kwargs
 
-    def _sanitize_parameters(self, **kwargs):
-        preprocess_kwargs = {}
-        if "tokenizer" in kwargs:
-            preprocess_kwargs["maybe_arg"] = kwargs["maybe_arg"]
-        forward_kwargs = {}
-        if "language" in kwargs:
-            forward_kwargs["language"] = kwargs["language"]
-        return preprocess_kwargs, forward_kwargs, {}
-
     def preprocess(self, audio):
-        return audio
+        pass
 
     def _forward(self, model_inputs, language="ja"):
-        outputs = self.model.inference(model_inputs['inputs'], language=language,**self.options)
-        return {'text': outputs[0][0]['text']}
+        pass
 
     def postprocess(self, model_outputs):
-        from funasr.utils.postprocess_utils import rich_transcription_postprocess
-        post_text = rich_transcription_postprocess(model_outputs["text"])
-        return {'text': post_text}
+        pass
 
     def load_audio(self, audio_path):
         from funasr.utils.load_utils import load_audio_text_image_video
@@ -304,56 +292,49 @@ class FasterFunPipeline(FasterPipeline):
                    skip_silence=True,
                    print_progress=False,
                    combined_progress=False) -> TranscriptionResult:
+        from funasr.utils.postprocess_utils import rich_transcription_postprocess
         if isinstance(audio, str):
             audio = self.load_audio(audio)
-
+        assert len(audio.shape) == 1, "audio should be a 1D tensor"
         # audio is a pytoch tensor format
         def data(audio, segments):
-            for seg in segments:
-                f1 = int(seg['start'] * SAMPLE_RATE)
-                f2 = int(seg['end'] * SAMPLE_RATE)
-                # print(f2-f1)
-                yield {'inputs': audio[f1:f2]}
+            if len(segments) == 1:
+                yield {'inputs': audio}
+            else:
+                for seg in segments:
+                    f1 = int(seg['start'] * SAMPLE_RATE)
+                    f2 = int(seg['end'] * SAMPLE_RATE)
+                    # print(f2-f1)
+                    if f1 > len(audio):
+                        logger.warning(f"Segment start time {seg['start']} is greater than audio length {len(audio)}")
+                        continue
+                    if f2 > len(audio):
+                        logger.warning(f"Segment end time {seg['end']} is greater than audio length {len(audio)}")
+                        f2 = len(audio)
+                    yield {'inputs': audio[f1:f2]}
 
-        if chunks_ref is None:
-            # to align with whisperx timestamp line, using whisperx's load_audio function
-            vad_audio = load_audio(audio)
-            vad_segments = self.vad_model({
-                "waveform":
-                torch.from_numpy(vad_audio).unsqueeze(0),
-                "sample_rate":
-                SAMPLE_RATE
-            })
-            del vad_audio
-            # skip_silence means time chunks are not adjacant to each other
-            vad_segments = merge_chunks(
-                vad_segments,
-                chunk_size,
-                skip_silence=skip_silence,
-                onset=self._vad_params["vad_onset"],
-                offset=self._vad_params["vad_offset"],
-            )
-        else:
+        segments: List[SingleSegment] = []
+        vad_segments = []
+        if chunks_ref is not None:
             import pysubs2
             subs = pysubs2.load(chunks_ref)
-            vad_segments = []
             for sub in subs:
                 start = int(sub.start) / 1000
                 end = int(sub.end) / 1000
                 vad_segments.append({"start": start, "end": end,"segments":[]})
+        else:
+            end_time = len(audio) / SAMPLE_RATE
+            vad_segments.append({"start": 0, "end": round(end_time, 3),"segments":[]})
 
-        segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        for idx, out in enumerate(
-                self.__call__(data(audio, vad_segments),
-                              batch_size=batch_size,
-                              num_workers=num_workers, language=language)):
+        for idx, seg in enumerate(data(audio, vad_segments)):
+            res = self.model.generate(input=seg['inputs'], language=language, **self.options)
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
-            text = out['text']
+            text = rich_transcription_postprocess(res[0]["text"])
             # if batch_size in [0, 1, None]:
             #     text = text[0]
             segments.append({
@@ -616,118 +597,6 @@ class FasterM4tPipeline(FasterPipeline):
                                                new_freq=SAMPLE_RATE)
         return audio
 
-class FasterWhisperxPipeline(FasterPipeline):
-    """
-    abstract Pipeline wrapper for FasterAsrModel.
-    """
-
-    def __init__(self,
-                 model,
-                 vad,
-                 vad_params: dict,
-                 options: NamedTuple,
-                 tokenizer=None,
-                 device: Union[int, str, "torch.device"] = -1,
-                 framework="pt",
-                 language: Optional[str] = None,
-                 suppress_numerals: bool = False,
-                 **kwargs):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.options = options
-        self.preset_language = language
-        self.suppress_numerals = suppress_numerals
-        self._batch_size = kwargs.pop("batch_size", None)
-        self._num_workers = 1
-        self._preprocess_params, self._forward_params, self._postprocess_params = self._sanitize_parameters(
-            **kwargs)
-        self.call_count = 0
-        self.framework = framework
-        if self.framework == "pt":
-            if isinstance(device, torch.device):
-                self.device = device
-            elif isinstance(device, str):
-                self.device = torch.device(device)
-            elif device < 0:
-                self.device = torch.device("cpu")
-            else:
-                self.device = torch.device(f"cuda:{device}")
-        else:
-            self.device = device
-
-        super(Pipeline, self).__init__()
-        self.vad_model = vad
-        self._vad_params = vad_params
-
-    def preprocess(self, audio):
-        pass
-
-    def _forward(self, model_inputs):
-        pass
-
-    def postprocess(self, model_outputs):
-        pass
-
-    def load_audio(self, audio_path):
-        from whisperx import load_audio
-        return load_audio(audio_path)
-
-    def transcribe(self,
-                   audio: Union[str, np.ndarray],
-                   batch_size=None,
-                   num_workers=0,
-                   language=None,
-                   task="transcribe",
-                   chunk_size=30,
-                   chunks_ref=None,
-                   skip_silence=True,
-                   print_progress=False,
-                   combined_progress=False) -> TranscriptionResult:
-        loaded_audio = self.load_audio(audio)
-
-        def data(audio, segments):
-            for seg in segments:
-                f1 = int(seg['start'] * SAMPLE_RATE)
-                f2 = int(seg['end'] * SAMPLE_RATE)
-                # print(f2-f1)
-                yield {'inputs': audio[f1:f2],"start":seg['start'],"end":seg['end']}
-
-        def get_segment(segments):
-            seg_texts = []
-            start_time = None
-            end_time = None
-            for seg in segments:
-                if start_time is None:
-                    start_time = seg.start
-                end_time = seg.end
-                seg_texts.append(seg.text)
-            segment = {"start": round(start_time, 3) if start_time is not None else 0.0, "end": round(end_time, 3) if end_time is not None else 0.0, "text": "".join(seg_texts)}
-            return segment
-
-        segments: List[SingleSegment] = []
-        batch_size = batch_size or self._batch_size
-        if chunks_ref is not None:
-            import pysubs2
-            subs = pysubs2.load(chunks_ref)
-            vad_segments = []
-            for sub in subs:
-                start = int(sub.start) / 1000
-                end = int(sub.end) / 1000
-                vad_segments.append({"start": start, "end": end,"segments":[]})
-
-            for idex, seg in enumerate(data(loaded_audio, vad_segments)):
-                audio = seg['inputs']
-                segs, _ = self.model.transcribe(audio,language=language, task=task)
-                segment = {"start": seg['start'],"end":seg['end'],"text":get_segment(segs)['text']}
-                segments.append(segment)
-        else:
-            segs, _ = self.model.transcribe(audio,language=language, task=task)
-            segments.append(get_segment(segs))
-
-        logger.info(segments)
-
-        return {"segments": segments, "language": "ja"}
-
 class FasterWhisperPipeline(FasterPipeline):
     """
     abstract Pipeline wrapper for FasterAsrModel.
@@ -782,7 +651,8 @@ class FasterWhisperPipeline(FasterPipeline):
                    skip_silence=True,
                    print_progress=False,
                    combined_progress=False) -> TranscriptionResult:
-
+        if isinstance(audio, str):
+            audio = self.load_audio(audio)
         def data(audio, segments):
             for seg in segments:
                 f1 = int(seg['start'] * SAMPLE_RATE)
@@ -801,17 +671,16 @@ class FasterWhisperPipeline(FasterPipeline):
                 end = int(sub.end) / 1000
                 vad_segments.append({"start": start, "end": end,"segments":[]})
 
-            loaded_audio = self.load_audio(audio)
-            for seg in data(loaded_audio, vad_segments):
+            for seg in data(audio, vad_segments):
                 audio = seg['inputs']
-                generate_kwargs={"language": "japanese", "no_repeat_ngram_size": 0, "repetition_penalty": 1.0}
+                generate_kwargs={"language": "japanese"}
                 result = self.model(audio, generate_kwargs=generate_kwargs)
                 segment = {"start": seg['start'],"end":seg['end'],"text":result['text']}
                 segments.append(segment)
         else:
-            generate_kwargs={"language": "japanese", "no_repeat_ngram_size": 0, "repetition_penalty": 1.0}
+            generate_kwargs={"language": "japanese"}
             result = self.model(audio,generate_kwargs=generate_kwargs, return_timestamps=True)
-            segment = {"start": 0,"end":0,"text":result['text']}
+            segment = {"start": 0,"end":round(len(audio)/SAMPLE_RATE,3),"text":result['text']}
             segments.append(segment)
 
         logger.info(segments)
@@ -842,17 +711,9 @@ def load_model(asr_arch,
     match asr_arch:
         case "funasr":
             from funasr import AutoModel
-            model, kwargs_m = AutoModel.build_model(
-                model="iic/SenseVoiceSmall",
-                trust_remote_code=True,
-                remote_code="./model.py",
-                device=device)
-            model.eval()
-            default_asr_options = {
-                "use_itn": False,
-                "ban_emo_unk": False
-            }
-            default_asr_options.update(kwargs_m)
+            model_dir = "iic/SenseVoiceSmall"
+            model = AutoModel(model=model_dir, trust_remote_code=False, device=device)
+            default_asr_options = {"cache":{},"use_itn":True, "ban_emo_unk":True}
             inst_cl = FasterFunPipeline
         case "k2asr":
             from reazonspeech.k2.asr import load_model
@@ -871,17 +732,11 @@ def load_model(asr_arch,
                 "facebook/seamless-m4t-v2-large")
             model.to(device)
             inst_cl = FasterM4tPipeline
-        case "whisperx":
-            from faster_whisper import WhisperModel
-            model_size = "base"
-            compute_type = "int8"
-            model = WhisperModel(model_size,device=device,compute_type=compute_type)
-            inst_cl = FasterWhisperxPipeline
         case "whisper":
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            # model_id = "openai/whisper-large-v3"
-            model_id = "litagin/anime-whisper"
+            # model_id = "openai/whisper-base"
+            model_id = "openai/whisper-large-v3"
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 model_id, torch_dtype=torch_dtype)
             model.to(device)
@@ -894,7 +749,7 @@ def load_model(asr_arch,
                 tokenizer=processor.tokenizer,
                 feature_extractor=processor.feature_extractor,
                 torch_dtype=torch_dtype,
-                device=device,
+                device=device
             )
             inst_cl = FasterWhisperPipeline
         case _:
