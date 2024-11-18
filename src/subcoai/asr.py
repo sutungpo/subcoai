@@ -347,7 +347,7 @@ class FasterFunPipeline(FasterPipeline):
 
         return {"segments": segments, "language": "ja"}
 
-class FasterK2Pipeline(FasterPipeline):
+class FasterNemoasrPipeline(FasterPipeline):
     """
     Huggingface Pipeline wrapper for FasterWhisperModel.
     """
@@ -366,7 +366,7 @@ class FasterK2Pipeline(FasterPipeline):
         pass
 
     def load_audio(self, audio_path):
-        from reazonspeech.k2.asr import audio_from_path
+        from reazonspeech.nemo.asr import audio_from_path
         audio = audio_from_path(audio_path)
         return audio
 
@@ -393,11 +393,12 @@ class FasterK2Pipeline(FasterPipeline):
                 audio_seg = SimpleNamespace(waveform=audio.waveform[f1:f2], samplerate=audio.samplerate)
                 yield {'inputs': audio_seg,"start":seg['start'],"end":seg['end']}
 
-        from reazonspeech.k2.asr import transcribe
+        from reazonspeech.nemo.asr import transcribe
         segments: List[SingleSegment] = []
         if chunks_ref is None:
             # to align with whisperx timestamp line, using whisperx's load_audio function
-            ret = transcribe(self.model, audio)
+            result = transcribe(self.model, audio)
+            end_time = len(audio.waveform) / audio.samplerate
             segment = {"start": 0,"end":0,"text":result.text}
             segments.append(segment)
         else:
@@ -444,49 +445,19 @@ class FasterNemoPipeline(FasterPipeline):
         super().__init__(model, vad, vad_params, options, tokenizer, device,
                          framework, language, suppress_numerals, **kwargs)
         self.file_ext = kwargs.pop("file_ext", ".mp3")
-        self.sample_rate = 16000
+        self.sample_rate = SAMPLE_RATE
 
     def preprocess(self, audio):
-        return audio
+        pass
 
-    def _forward(self, model_inputs, file_ext=None):
-        audio = model_inputs['inputs']
-        text = self.model.transcribe([audio])
-        return {'text': text[0][0]}
+    def _forward(self, model_inputs):
+        pass
 
     def postprocess(self, model_outputs):
-        return model_outputs
+        pass
 
     def load_audio(self, audio_path):
-        import torchaudio.transforms as T
-        waveform, sample_rate = torchaudio.load(audio_path)
-        if waveform.size(0) > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        resample_transform = T.Resample(orig_freq=sample_rate,
-                                        new_freq=SAMPLE_RATE)
-        waveform = resample_transform(waveform)
-        return waveform.squeeze(0)
-
-    def get_iterator(self, inputs, num_workers: int, batch_size: int,
-                     preprocess_params, forward_params, postprocess_params):
-        dataset = PipelineIterator(inputs, self.preprocess, preprocess_params)
-        if "TOKENIZERS_PARALLELISM" not in os.environ:
-            os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        # TODO hack by collating feature_extractor and image_processor
-
-        # def stack(items):
-        #     return {'inputs': torch.stack([x['inputs'] for x in items])}
-
-        dataloader = torch.utils.data.DataLoader(dataset,
-                                                 num_workers=num_workers,
-                                                 batch_size=batch_size)
-        model_iterator = PipelineIterator(dataloader,
-                                          self.forward,
-                                          forward_params,
-                                          loader_batch_size=batch_size)
-        final_iterator = PipelineIterator(model_iterator, self.postprocess,
-                                          postprocess_params)
-        return final_iterator
+        pass
 
     # attention, base Pipeline may has different implementation
     def transcribe(self,
@@ -496,15 +467,11 @@ class FasterNemoPipeline(FasterPipeline):
                    language=None,
                    task=None,
                    chunk_size=30,
+                   chunks_ref=None,
                    print_progress=False,
                    combined_progress=False) -> TranscriptionResult:
-        audio_tensor = self.load_audio(audio)
-
-        # audio is a pytoch tensor format
         def data(audio, segments):
             for idx, seg in enumerate(segments):
-                f1 = int(seg['start'] * SAMPLE_RATE)
-                f2 = int(seg['end'] * SAMPLE_RATE)
                 import subprocess
                 import tempfile
                 start_time = seg['start']
@@ -512,90 +479,42 @@ class FasterNemoPipeline(FasterPipeline):
                 tmp_path =  tempfile.mkdtemp()
                 out_audio = os.path.join(tmp_path, f"chunk_{idx}{self.file_ext}")
                 command = [
-                    "ffmpeg", "-i", f"{audio}", "-ss", f"{start_time:.2f}",
-                    "-to", f"{end_time:.2f}", "-ar", f"{self.sample_rate}", "-ac", "1", f"{out_audio}"
+                    "ffmpeg", "-i", f"{audio}", "-ss", f"{start_time:.3f}",
+                    "-to", f"{end_time:.3f}", "-ar", f"{self.sample_rate}", "-ac", "1", f"{out_audio}"
                 ]
                 subprocess.run(command, check=True)
 
-                yield {'inputs': out_audio}
-
-        vad_segments = self.vad_model({
-            "waveform": audio_tensor.unsqueeze(0),
-            "sample_rate": SAMPLE_RATE
-        })
-        vad_segments = merge_chunks(
-            vad_segments,
-            chunk_size,
-            onset=self._vad_params["vad_onset"],
-            offset=self._vad_params["vad_offset"],
-        )
+                yield {'inputs': out_audio, "start": start_time, "end": end_time}
 
         segments: List[SingleSegment] = []
-        batch_size = batch_size or self._batch_size
-        total_segments = len(vad_segments)
-        for idx, out in enumerate(
-                self.__call__(data(audio, vad_segments),
-                              batch_size=batch_size,
-                              num_workers=num_workers)):
-            if print_progress:
-                base_progress = ((idx + 1) / total_segments) * 100
-                percent_complete = base_progress / 2 if combined_progress else base_progress
-                print(f"Progress: {percent_complete:.2f}%...")
-            text = out['text']
-            # if batch_size in [0, 1, None]:
-            #     text = text[0]
-            segments.append({
-                "text": text,
-                "start": round(vad_segments[idx]['start'], 3),
-                "end": round(vad_segments[idx]['end'], 3)
-            })
+        if chunks_ref is None:
+            import librosa
+            end_time = librosa.get_duration(filename=audio)
+            result = self.model.transcribe([audio])
+            segment = {"start": 0,"end":end_time,"text":result[0][0]}
+            segments.append(segment)
+        else:
+            # chunks_ref has the same length as audio
+            import pysubs2
+            subs = pysubs2.load(chunks_ref)
+            vad_segments = []
+            for sub in subs:
+                start = int(sub.start) / 1000
+                end = int(sub.end) / 1000
+                vad_segments.append({
+                    "start": start,
+                    "end": end,
+                    "segments": []
+                })
+            for seg in data(audio, vad_segments):
+                audio = seg['inputs']
+                result = self.model.transcribe([audio])
+                segment = {"start": seg['start'],"end":seg['end'],"text":result[0][0]}
+                segments.append(segment)
+
+        logger.info(segments)
 
         return {"segments": segments, "language": self.preset_language}
-
-
-class FasterM4tPipeline(FasterPipeline):
-    """
-    Huggingface Pipeline wrapper for FasterWhisperModel.
-    """
-
-    # TODO:
-    # - add support for timestamp mode
-    # - add support for custom inference kwargs
-    def __init__(self,
-                 model,
-                 vad,
-                 vad_params: dict,
-                 options: NamedTuple,
-                 tokenizer=None,
-                 device: Union[int, str, "torch.device"] = -1,
-                 framework="pt",
-                 language: Optional[str] = None,
-                 suppress_numerals: bool = False,
-                 **kwargs):
-        super().__init__(model, vad, vad_params, options, tokenizer, device,
-                         framework, language, suppress_numerals, **kwargs)
-        from transformers import AutoProcessor
-        self.processor = AutoProcessor.from_pretrained("facebook/seamless-m4t-v2-large")
-
-    def preprocess(self, audio):
-        audio = self.processor(audios=audio['inputs'], src_lang="jpn",return_tensors="pt")
-        return {'inputs': audio}
-
-    def _forward(self, model_inputs):
-        tgt_lang = 'jpn'
-        output_tokens = self.model.generate(**model_inputs['inputs'], tgt_lang=tgt_lang, generate_speech=False)
-        translated_text_from_audio = self.processor.decode(output_tokens[0].tolist()[0], skip_special_tokens=True)
-        return {'text': translated_text_from_audio}
-
-    def postprocess(self, model_outputs):
-        return model_outputs
-
-    def load_audio(self, audio_path):
-        audio, orig_freq = torchaudio.load(audio_path)
-        audio = torchaudio.functional.resample(audio,
-                                               orig_freq=orig_freq,
-                                               new_freq=SAMPLE_RATE)
-        return audio
 
 class FasterWhisperPipeline(FasterPipeline):
     """
@@ -715,23 +634,16 @@ def load_model(asr_arch,
             model = AutoModel(model=model_dir, trust_remote_code=False, device=device)
             default_asr_options = {"cache":{},"use_itn":True, "ban_emo_unk":True}
             inst_cl = FasterFunPipeline
-        case "k2asr":
-            from reazonspeech.k2.asr import load_model
-            model = load_model(device=device)
-            inst_cl = FasterK2Pipeline
         case "nemoasr":
+            from reazonspeech.nemo.asr import load_model
+            model = load_model(device=device)
+            inst_cl = FasterNemoasrPipeline
+        case "nemopa":
             import nemo.collections.asr as nemo_asr
             model = nemo_asr.models.ASRModel.from_pretrained(
                 model_name="nvidia/parakeet-tdt_ctc-0.6b-ja",
                 map_location=torch.device(device))
             inst_cl = FasterNemoPipeline
-        case "m4tasr":
-            from transformers import SeamlessM4Tv2Model
-
-            model = SeamlessM4Tv2Model.from_pretrained(
-                "facebook/seamless-m4t-v2-large")
-            model.to(device)
-            inst_cl = FasterM4tPipeline
         case "whisper":
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
