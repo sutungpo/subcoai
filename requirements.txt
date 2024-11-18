@@ -1,12 +1,7 @@
 transformers
-torch>=2
-torchaudio>=2
 funasr==1.1.11 
-modelscope==1.10.0
-numpy<=1.26.4
-gradio
-fastapi>=0.111.1
 pysubs2
+pyannote.audio
 git+https://github.com/reazon-research/ReazonSpeech.git#egg=reazonspeech-nemo-asr&subdirectory=pkg/nemo-asr
-#nemo_toolkit[asr]
-#huggingface-hub==0.23.2
+nemo_toolkit[asr]
+huggingface-hub==0.23.2
