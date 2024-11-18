@@ -480,7 +480,7 @@ class FasterNemoPipeline(FasterPipeline):
                 out_audio = os.path.join(tmp_path, f"chunk_{idx}{self.file_ext}")
                 command = [
                     "ffmpeg", "-i", f"{audio}", "-ss", f"{start_time:.3f}",
-                    "-to", f"{end_time:.3f}", "-ar", f"{self.sample_rate}", "-ac", "1", f"{out_audio}"
+                    "-to", f"{end_time:.3f}", "-ar", f"{self.sample_rate}", "-ac", "1","-loglevel", "quiet", f"{out_audio}"
                 ]
                 subprocess.run(command, check=True)
 
@@ -630,8 +630,9 @@ def load_model(asr_arch,
     match asr_arch:
         case "funasr":
             from funasr import AutoModel
-            model_dir = "iic/SenseVoiceSmall"
-            model = AutoModel(model=model_dir, trust_remote_code=False, device=device)
+            model_dir = "FunAudioLLM/SenseVoiceSmall"
+            model = AutoModel(model=model_dir, trust_remote_code=False, device=device, hub="hf")
+            # model = AutoModel(model=model_dir, device=device, hub="hf")
             default_asr_options = {"cache":{},"use_itn":True, "ban_emo_unk":True}
             inst_cl = FasterFunPipeline
         case "nemoasr":
